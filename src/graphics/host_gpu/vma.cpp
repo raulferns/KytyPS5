@@ -715,7 +715,16 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 			ClearRetiredImages();
 			result = allocate();
 		}
+		if (result == vk::Result::eErrorOutOfDeviceMemory) {
+			// Low-VRAM spillover: retry allowing host/shared memory if driver allows it.
+			alloc_info.requiredFlags  = 0;
+			alloc_info.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+			result = allocate();
+		}
 		if (result != vk::Result::eSuccess) {
+			LOGF("CreateImage: vmaCreateImage failed: %s (format=%s extent=%ux%ux%u levels=%u)\n",
+			     vk::to_string(result).c_str(), vk::to_string(image_info.format).c_str(),
+			     image_info.extent.width, image_info.extent.height, image_info.mipLevels);
 			LogMemoryBudget();
 			return false;
 		}
@@ -732,7 +741,10 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	if (VramStats::Enabled()) {
 		VmaAllocationInfo allocation_info {};
 		vmaGetAllocationInfo(allocator, image.allocation, &allocation_info);
-		VramStats::Note(VramStats::Kind::Image, true, static_cast<int64_t>(allocation_info.size));
+		VkMemoryPropertyFlags properties = 0;
+		vmaGetAllocationMemoryProperties(allocator, image.allocation, &properties);
+		const bool is_device_local = (properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+		VramStats::Note(VramStats::Kind::Image, is_device_local, static_cast<int64_t>(allocation_info.size));
 	}
 
 	image.format     = image_info.format;
@@ -791,7 +803,10 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 	if (VramStats::Enabled()) {
 		VmaAllocationInfo allocation_info {};
 		vmaGetAllocationInfo(allocator, image.allocation, &allocation_info);
-		VramStats::Note(VramStats::Kind::Image, true, -static_cast<int64_t>(allocation_info.size));
+		VkMemoryPropertyFlags properties = 0;
+		vmaGetAllocationMemoryProperties(allocator, image.allocation, &properties);
+		const bool is_device_local = (properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+		VramStats::Note(VramStats::Kind::Image, is_device_local, -static_cast<int64_t>(allocation_info.size));
 	}
 	bool retained = false;
 	if (image.pool_eligible && NativeImagePoolEnabled()) {
