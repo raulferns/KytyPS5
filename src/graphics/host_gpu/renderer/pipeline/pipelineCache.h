@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/threads.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineFastFirst.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ir/ResourceSnapshot.h"
@@ -25,6 +26,8 @@ namespace Libs::Graphics {
 
 struct GraphicContext;
 class ProgramDiskCache;
+class ShaderJournal;
+class ShaderPrecompiler;
 struct RenderColorInfo;
 struct RenderDepthInfo;
 class CommandBuffer;
@@ -232,6 +235,8 @@ public:
 		uint64_t programs = 0;
 	};
 	[[nodiscard]] PrefetchTotals GetPrefetchTotals() const;
+	// KYTY_PIPELINE_FAST_FIRST counters (all zero when it is off); tests and diagnostics.
+	[[nodiscard]] FastFirstSnapshot GetFastFirstTotals() const;
 	void NoteProgramPrefetchWait(uint64_t ns);
 	void PrefetchGraphicsPipeline(const PipelineTargets& targets, const HW::Context& ctx,
 	    const HW::UserConfig& user_config, const ShaderVertexInputInfo& vertex_info,
@@ -277,12 +282,17 @@ public:
 		uint64_t permutation_hits  = 0;
 		uint64_t verify_checks     = 0;
 		uint64_t verify_mismatches = 0;
+		// Permutations published by the shader precompile replay (KYTY_SHADER_PRECOMPILE).
+		uint64_t replayed          = 0;
 	};
 	[[nodiscard]] static ProgramTotals Totals();
 	// The persistent program cache; null when KYTY_PROGRAM_CACHE is off.
 	[[nodiscard]] ProgramDiskCache* GetProgramDiskCache() const { return m_program_disk.get(); }
 	// Returns once the checks KYTY_PROGRAM_CACHE_VERIFY=background has queued are done (tests).
 	void WaitProgramChecks();
+	// Returns once the shader precompile replay (KYTY_SHADER_PRECOMPILE, shaderPrecompile.h) has
+	// replayed every journal entry (tests); at once when it is off. The journal is also written.
+	void WaitShaderPrecompile();
 	// Diagnostic only; skips busy cache locks instead of waiting for compiles/preparation.
 	void ReportRamStats();
 
@@ -291,6 +301,7 @@ private:
 	struct PipelineDiagnostics;
 	struct DriverCacheSaver;
 	struct LibraryState;
+	struct FastFirstState;
 
 	struct GraphicsPipelineKey {
 		PipelineRenderingState   rendering;
@@ -366,8 +377,15 @@ private:
 	// Graphics pipeline libraries and the background compiles that replace linked pipelines
 	// (KYTY_PIPELINE_LIBRARY, pipelineLibrary.h); null when off or unsupported.
 	std::unique_ptr<LibraryState> m_library;
+	// Unoptimized-first pipeline creation and the background optimized compiles
+	// (KYTY_PIPELINE_FAST_FIRST, pipelineFastFirst.h); null when off.
+	std::unique_ptr<FastFirstState> m_fast_first;
 	struct PrefetchState;
 	std::unique_ptr<PrefetchState> m_prefetch;
+	// Shader precompile (KYTY_SHADER_PRECOMPILE=1, shaderPrecompile.h): the journal of compiled
+	// permutations' inputs and the background replay of the entries an earlier run left in it.
+	std::unique_ptr<ShaderJournal>     m_shader_journal;
+	std::unique_ptr<ShaderPrecompiler> m_shader_precompiler;
 	// Bumped whenever a cached pipeline object is replaced (a linked pipeline by its optimized
 	// build), so that per-thread lookup memos do not keep returning the replaced object. Starts in
 	// a range of its own per cache instance, so memos never match another instance.
@@ -385,6 +403,8 @@ private:
 
 	void InitializeDriverCache();
 	void InitializeProgramDiskCache();
+	void InitializeShaderPrecompile();
+	void StopShaderPrecompile();
 	// Serializes m_driver_cache and atomically replaces the cache file. Returns the payload size
 	// written, 0 on failure, or UINT64_MAX for a periodic save skipped over the size cap.
 	uint64_t WriteDriverCache(bool periodic);
@@ -392,6 +412,11 @@ private:
 	// Background compile finished: swaps `optimized` in for the linked pipeline cached under `key`.
 	void ReplaceLinkedPipeline(const GraphicsPipelineKey* key, vk::Pipeline linked,
 	                           vk::Pipeline optimized);
+	// Fast-first: swaps the optimized pipeline in for the unoptimized one cached under the key (a
+	// new object; the old one is retired), and destroys retired handles that are old enough.
+	void ReplaceFastPipeline(const GraphicsPipelineKey* graphics_key, uint64_t compute_id,
+	                         vk::Pipeline fast, vk::Pipeline optimized, uint64_t fast_ns,
+	                         uint64_t optimize_ns);
 };
 
 // Creates a graphics pipeline from a complete monolithic create info instead of
@@ -419,9 +444,14 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
                             const PipelineStaticParameters&        static_params,
                             vk::PipelineCache                      driver_cache,
                             const GraphicsPipelineCreateHook*      create_hook = nullptr);
+// Creates a compute pipeline from the complete create info instead of vkCreateComputePipelines
+// (KYTY_PIPELINE_FAST_FIRST). The create info and its chained structures live only for the call.
+using ComputePipelineCreateHook =
+    std::function<vk::Result(const vk::ComputePipelineCreateInfo& info, vk::Pipeline* pipeline)>;
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
-                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache);
+                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache,
+                            const ComputePipelineCreateHook* create_hook = nullptr);
 
 } // namespace Libs::Graphics
 
