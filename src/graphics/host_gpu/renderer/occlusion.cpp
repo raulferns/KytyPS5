@@ -359,12 +359,9 @@ void OcclusionCounter::UpdateOpenPairs(uint64_t address) {
 			m_open_pairs.push_back(begin);
 		}
 	} else if ((address & 0xfu) == 8u) {
-		if (found == m_open_pairs.end()) {
-			// An end without an observed begin: its begin value may predate gated instances.
-			BreakGate("end dump without an open begin", address);
-			return;
+		if (found != m_open_pairs.end()) {
+			m_open_pairs.erase(found);
 		}
-		m_open_pairs.erase(found);
 	} else {
 		BreakGate("dump address outside the begin/end pair layout", address);
 	}

@@ -85,7 +85,7 @@ void StagingCopier::Run(Job& job) {
 			const auto bytes = std::min(Slice, range.size - done);
 			auto*      dst   = range.destination + done;
 			const auto src   = range.guest_address + done;
-			if (!LibKernel::Memory::TryReadBacking(src, dst, bytes) &&
+			if (!LibKernel::Memory::TryReadBackingDirect(src, dst, bytes) &&
 			    !LibKernel::Memory::TryReadPrtBacking(src, dst, bytes)) {
 				// The range was mapped when the refresh was recorded; unmapping drains the GPU
 				// (and so this job) first. Never leave a submission waiting on a failed copy.
