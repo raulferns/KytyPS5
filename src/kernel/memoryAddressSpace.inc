@@ -1028,7 +1028,7 @@ public:
 		if (size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::shared_lock lock(m_mutex);
 		return std::any_of(m_owned.begin(), m_owned.end(), [vaddr, size](const auto& range) {
 			return vaddr >= range.first && vaddr + size <= range.first + range.second;
 		});
@@ -1038,7 +1038,7 @@ public:
 		if (size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::shared_lock lock(m_mutex);
 		return std::any_of(m_owned.begin(), m_owned.end(), [vaddr, size](const auto& range) {
 			return VirtualRangesOverlap(vaddr, size, range.first, range.second);
 		});
@@ -1075,7 +1075,7 @@ public:
 		if (size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::shared_lock lock(m_mutex);
 		return ProtectMappedUnlocked(vaddr, size, mode);
 	}
 
@@ -1084,7 +1084,7 @@ public:
 			return false;
 		}
 
-		std::lock_guard lock(m_mutex);
+		std::shared_lock lock(m_mutex);
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
 		// KYTY_UFFD_WP (common/platform/uffdWriteWatch.h): write-watching without mprotect.
 		if (Common::UffdWriteWatch::Enabled()) {
@@ -1097,7 +1097,7 @@ public:
 	bool MapBacking(uint64_t vaddr, uint64_t size, uint64_t backing_offset,
 	                VirtualMemory::Mode               mode,
 	                GuestBackingStore::FailureReason* failure_reason = nullptr) {
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex);
 		if (!ConsumeUnlocked(vaddr, size)) {
 			if (failure_reason != nullptr) {
 				*failure_reason = GuestBackingStore::FailureReason::AddressRangeUnavailable;
@@ -1117,7 +1117,7 @@ public:
 	}
 
 	bool UnmapBacking(uint64_t vaddr, uint64_t size) {
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex);
 		if (!ContainsMappedUnlocked(vaddr, size, MappingType::Backing)) {
 			return false;
 		}
@@ -1138,7 +1138,7 @@ public:
 			return 0;
 		}
 		alignment = std::max<uint64_t>(alignment != 0 ? alignment : PageSize(), PageSize());
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex);
 		if (search_addr == 0) {
 			auto addr = FindFreeAlignedUnlocked(HOST_SYSTEM_MANAGED_MIN,
 			                                    HOST_SYSTEM_MANAGED_MAX + 1u, size, alignment);
@@ -1155,7 +1155,7 @@ public:
 			return 0;
 		}
 		alignment = std::max<uint64_t>(alignment, PageSize());
-		std::lock_guard lock(m_mutex);
+		std::shared_lock lock(m_mutex);
 		return FindFreeAlignedUnlocked(search_start, search_end, size, alignment);
 	}
 
@@ -1163,24 +1163,24 @@ public:
 		if (vaddr == 0 || size == 0 || !IsPageAligned(vaddr) || !IsPageAligned(size)) {
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::shared_lock lock(m_mutex);
 		return FindContaining(vaddr, size) != m_free.end();
 	}
 
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 	bool TestContainsFree(uint64_t vaddr, uint64_t size) {
-		std::lock_guard lock(m_mutex);
+		std::shared_lock lock(m_mutex);
 		return FindContaining(vaddr, size) != m_free.end();
 	}
 #endif
 
 	bool ReleaseFree(uint64_t vaddr, uint64_t size) {
-		std::lock_guard lock(m_mutex);
+		std::shared_lock lock(m_mutex);
 		return FindContaining(vaddr, size) != m_free.end();
 	}
 
 	bool Commit(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode) {
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex);
 		if (!ConsumeUnlocked(vaddr, size)) {
 			return false;
 		}
@@ -1215,7 +1215,7 @@ public:
 		if (vaddr == 0 || size == 0 || !IsPageAligned(vaddr) || !IsPageAligned(size)) {
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex);
 		if (!ContainsMappedUnlocked(vaddr, size, MappingType::Private)) {
 			return false;
 		}
@@ -1310,10 +1310,26 @@ private:
 
 	bool ProtectMappedUnlocked(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode) {
 		const auto end = vaddr + size;
-		auto       it  = m_mapped.upper_bound(vaddr);
+		// Fast-path: thread-local cached mapping range check
+		thread_local uint64_t t_last_vaddr      = 0;
+		thread_local uint64_t t_last_end        = 0;
+		thread_local uint64_t t_last_generation = 0;
+		const auto current_gen = m_mapped_generation.load(std::memory_order_relaxed);
+		if (t_last_end != 0 && t_last_generation == current_gen && vaddr >= t_last_vaddr && end <= t_last_end) {
+			return VirtualMemory::Protect(vaddr, size, mode);
+		}
+
+		auto it = m_mapped.upper_bound(vaddr);
 		if (it != m_mapped.begin()) {
 			--it;
 		}
+		if (it != m_mapped.end() && vaddr >= it->second.vaddr && end <= it->second.vaddr + it->second.size) {
+			t_last_vaddr      = it->second.vaddr;
+			t_last_end        = it->second.vaddr + it->second.size;
+			t_last_generation = current_gen;
+			return VirtualMemory::Protect(vaddr, size, mode);
+		}
+
 		for (; it != m_mapped.end() && it->second.vaddr < end; ++it) {
 			const auto& region      = it->second;
 			const auto  range_start = std::max(vaddr, region.vaddr);
@@ -1380,13 +1396,18 @@ private:
 				return false;
 			}
 		}
-		return m_mapped.emplace(vaddr, MappedRegion {vaddr, size, type, uffd}).second;
+		const auto res = m_mapped.emplace(vaddr, MappedRegion {vaddr, size, type, uffd}).second;
+		if (res) {
+			m_mapped_generation.fetch_add(1, std::memory_order_release);
+		}
+		return res;
 	}
 
 	bool RemoveMappedUnlocked(uint64_t vaddr, uint64_t size, MappingType type) {
 		if (!ContainsMappedUnlocked(vaddr, size, type)) {
 			return false;
 		}
+		m_mapped_generation.fetch_add(1, std::memory_order_release);
 		const auto end     = vaddr + size;
 		auto       current = vaddr;
 		while (current < end) {
@@ -1845,9 +1866,10 @@ private:
 #endif
 	}
 
-	std::mutex                                 m_mutex;
+	std::shared_mutex                          m_mutex;
+	std::atomic<uint64_t>                      m_mapped_generation {1};
 	std::map<uint64_t, uint64_t>               m_free;
-	std::map<uint64_t, MappedRegion>            m_mapped;
+	std::map<uint64_t, MappedRegion>           m_mapped;
 	std::vector<std::pair<uint64_t, uint64_t>> m_owned;
 	uint64_t                                   m_granularity = 0x10000;
 	GuestBackingStore*                         m_backing     = nullptr;

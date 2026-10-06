@@ -4511,7 +4511,7 @@ void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
 		ImagePageTable::PageRange pages {};
 		bool                      covered = !ImagePageTable::TryGetPageRange(address, size, pages);
 		for (auto page = pages.first; !covered && page < pages.last_exclusive; ++page) {
-			covered = m_image_page_counts[page].load() != 0;
+			covered = m_image_page_counts[page].load(std::memory_order_relaxed) != 0;
 		}
 		if (!covered) {
 			Profiler::CountFrameEvent(Profiler::FrameEvent::TextureInvalidateSkips);
@@ -4635,7 +4635,7 @@ bool TextureCache::MayOverlapImages(uint64_t address, uint64_t size) const {
 		return true;
 	}
 	for (auto page = pages.first; page < pages.last_exclusive; ++page) {
-		if (m_image_page_counts[page].load() != 0) {
+		if (m_image_page_counts[page].load(std::memory_order_relaxed) != 0) {
 			return true;
 		}
 	}

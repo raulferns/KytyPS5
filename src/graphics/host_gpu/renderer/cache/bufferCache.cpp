@@ -293,7 +293,7 @@ bool DirtyQueryCombinedEnabled() {
 // the stream buffer reads the guest bytes through the guest mapping instead of the backing store
 // (TryReadBacking). Its pages are CPU-dirty and not GPU-dirty, so no protection stops the read.
 bool StreamDirectReadEnabled() {
-	static const bool enabled = ParseEnvU64("KYTY_STREAM_DIRECT_READ", 0) != 0;
+	static const bool enabled = ParseEnvU64("KYTY_STREAM_DIRECT_READ", 1) != 0;
 	return enabled;
 }
 
