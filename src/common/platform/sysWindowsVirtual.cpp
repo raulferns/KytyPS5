@@ -314,7 +314,32 @@ bool FreeRange(uint64_t address, uint64_t size) {
 	return current - address == size && Free(address);
 }
 
+using NtProtectVirtualMemory_t = LONG(NTAPI*)(HANDLE ProcessHandle, PVOID* BaseAddress,
+                                               PSIZE_T RegionSize, ULONG NewProtect,
+                                               PULONG OldProtect);
+
+static NtProtectVirtualMemory_t ResolveNtProtect() {
+	static const auto fn = []() -> NtProtectVirtualMemory_t {
+		HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+		return ntdll ? reinterpret_cast<NtProtectVirtualMemory_t>(GetProcAddress(ntdll, "NtProtectVirtualMemory")) : nullptr;
+	}();
+	return fn;
+}
+
 bool Protect(uint64_t address, uint64_t size, Mode mode) {
+	static const auto pfnNtProtect = ResolveNtProtect();
+	if (pfnNtProtect != nullptr) {
+		PVOID base_addr = reinterpret_cast<PVOID>(static_cast<uintptr_t>(address));
+		SIZE_T reg_size = static_cast<SIZE_T>(size);
+		ULONG old_protect = 0;
+		LONG status = pfnNtProtect(GetCurrentProcess(), &base_addr, &reg_size, GetProtectionFlag(mode), &old_protect);
+		if (status < 0) {
+			printf("NtProtectVirtualMemory() failed: 0x%08" PRIx32 "\n", static_cast<uint32_t>(status));
+			return false;
+		}
+		return true;
+	}
+
 	DWORD old_protect = 0;
 	if (VirtualProtect(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size,
 	                   GetProtectionFlag(mode), &old_protect) == 0) {

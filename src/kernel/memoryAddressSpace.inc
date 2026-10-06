@@ -873,8 +873,7 @@ private:
 	}
 
 	static bool ApplyProtection(void* ptr, uint64_t size, VirtualMemory::Mode mode) {
-		DWORD old_protect = 0;
-		return VirtualProtect(ptr, size, GetProtect(mode), &old_protect) != 0;
+		return VirtualMemory::Protect(reinterpret_cast<uint64_t>(ptr), size, mode);
 	}
 
 	static bool SplitPlaceholder(uint64_t vaddr, uint64_t size) {

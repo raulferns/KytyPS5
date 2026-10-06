@@ -115,7 +115,9 @@ uint32_t FaultAheadOverridePages() {
 	}
 	uint64_t kib = static_cast<uint64_t>(value);
 	if (value == -2) {
-		kib = uint64_t {256} << std::clamp(FaultCost::SlowLevel(), 0, 2);
+		// Level 0: 512 KiB, Level 1: 2048 KiB, Level 2 (VBS/slow protection): 4096 KiB
+		const int slow_level = std::clamp(FaultCost::SlowLevel(), 0, 2);
+		kib = (slow_level == 2) ? 4096 : (slow_level == 1 ? 2048 : 512);
 	}
 	return static_cast<uint32_t>(kib * 1024 / TRACKER_PAGE_SIZE);
 }
@@ -126,7 +128,10 @@ uint32_t FaultAheadOverridePages() {
 // submission that 1 leaves for the next submission's pass. Both values only decide whether a pass
 // runs now, and every pass records the epochs both read, so it can switch at any flip.
 int64_t ParseBdaSyncPerSubmission(const char* value) {
-	if (value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0) {
+	if (value == nullptr || value[0] == '\0') {
+		return 1;
+	}
+	if (std::strcmp(value, "0") == 0) {
 		return 0;
 	}
 	return std::strcmp(value, "verify") == 0 ? 2 : 1;
