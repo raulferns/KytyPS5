@@ -218,7 +218,7 @@ struct GraphicContext {
 	// sample need memory. DeleteImage frees the memory.
 	[[nodiscard]] bool     CreateSparseImage(const vk::ImageCreateInfo& info, uint32_t first_level,
 	                                         VulkanImage& image);
-	void                   BindSparseImageLevels(VulkanImage& image, uint32_t first_level);
+	[[nodiscard]] bool     BindSparseImageLevels(VulkanImage& image, uint32_t first_level);
 	// The device memory behind an image: its allocation's size, or the bound bytes of a sparse one.
 	[[nodiscard]] uint64_t NativeImageBytes(const VulkanImage& image) const;
 

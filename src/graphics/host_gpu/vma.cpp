@@ -377,7 +377,12 @@ bool GraphicContext::CreateSparseImage(const vk::ImageCreateInfo& info, uint32_t
 	image.subresource_states.clear();
 	image.pool_eligible    = false;
 	image.pool_create_info = vk::ImageCreateInfo {};
-	BindSparseImageLevels(image, first_level);
+	if (!BindSparseImageLevels(image, first_level)) {
+		device.destroyImage(native, nullptr);
+		image.image = nullptr;
+		image.sparse.reset();
+		return false;
+	}
 	if (HangTrace::Enabled()) {
 		HangTrace::RecordNativeImage(true, false, static_cast<uint32_t>(sparse_info.format),
 		                             sparse_info.extent.width, sparse_info.extent.height,
@@ -387,13 +392,13 @@ bool GraphicContext::CreateSparseImage(const vk::ImageCreateInfo& info, uint32_t
 	return true;
 }
 
-void GraphicContext::BindSparseImageLevels(VulkanImage& image, uint32_t first_level) {
+bool GraphicContext::BindSparseImageLevels(VulkanImage& image, uint32_t first_level) {
 	EXIT_IF(!image.sparse || image.image == nullptr);
 	auto&      state  = *image.sparse;
 	const auto levels = image.mip_levels;
 	const auto first  = std::min(first_level, levels - 1);
 	if (first >= state.first_bound) {
-		return;
+		return true;
 	}
 	// New levels: [first, end). Levels from tail_first on live in the mip tail, bound as a whole.
 	const auto end        = std::min(state.first_bound, levels);
@@ -417,7 +422,7 @@ void GraphicContext::BindSparseImageLevels(VulkanImage& image, uint32_t first_le
 	bytes += tail_bytes;
 	if (bytes == 0) {
 		state.first_bound = first;
-		return;
+		return true;
 	}
 	VkMemoryRequirements requirements {};
 	requirements.size           = bytes;
@@ -427,9 +432,27 @@ void GraphicContext::BindSparseImageLevels(VulkanImage& image, uint32_t first_le
 	create.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 	VmaAllocation     allocation = nullptr;
 	VmaAllocationInfo info {};
-	RequireVulkanSuccess(static_cast<vk::Result>(
-	                         vmaAllocateMemory(allocator, &requirements, &create, &allocation, &info)),
-	                     "allocate sparse image memory");
+	auto allocate = [&] {
+		return static_cast<vk::Result>(
+		    vmaAllocateMemory(allocator, &requirements, &create, &allocation, &info));
+	};
+	auto result = allocate();
+	if (result == vk::Result::eErrorOutOfDeviceMemory && NativeImagePoolEnabled()) {
+		ClearRetiredImages();
+		result = allocate();
+	}
+	if (result == vk::Result::eErrorOutOfDeviceMemory) {
+		// Low-VRAM spillover: retry allowing host/shared memory if driver allows it.
+		create.requiredFlags  = 0;
+		create.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		result = allocate();
+	}
+	if (result != vk::Result::eSuccess) {
+		LOGF("BindSparseImageLevels: vmaAllocateMemory failed: %s (bytes=%llu)\n",
+		     vk::to_string(result).c_str(), static_cast<unsigned long long>(bytes));
+		LogMemoryBudget();
+		return false;
+	}
 	EXIT_IF(info.offset % state.block_size != 0);
 	uint64_t offset = info.offset;
 	for (uint32_t level = first; level < std::min(end, tail_first); ++level) {
@@ -463,27 +486,46 @@ void GraphicContext::BindSparseImageLevels(VulkanImage& image, uint32_t first_le
 		std::scoped_lock lock(m_sparse_mutex);
 		if (m_sparse_fence == nullptr) {
 			vk::FenceCreateInfo fence_info {};
-			RequireVulkanSuccess(device.createFence(&fence_info, nullptr, &m_sparse_fence),
-			                     "create sparse binding fence");
+			const auto fence_res = device.createFence(&fence_info, nullptr, &m_sparse_fence);
+			if (fence_res != vk::Result::eSuccess) {
+				LOGF("BindSparseImageLevels: createFence failed: %s\n", vk::to_string(fence_res).c_str());
+				vmaFreeMemory(allocator, allocation);
+				return false;
+			}
 		}
-		vk::Result result {};
+		vk::Result bind_result {};
 		if (side_queue != nullptr) {
 			Common::LockGuard queue_lock(side_queue_mutex);
-			result = side_queue.bindSparse(1, &bind_info, m_sparse_fence);
+			bind_result = side_queue.bindSparse(1, &bind_info, m_sparse_fence);
 		} else {
 			Common::LockGuard queue_lock(queue_mutex);
-			result = queue.bindSparse(1, &bind_info, m_sparse_fence);
+			bind_result = queue.bindSparse(1, &bind_info, m_sparse_fence);
 		}
-		RequireVulkanSuccess(result, "bind sparse image memory");
-		RequireVulkanSuccess(device.waitForFences(1, &m_sparse_fence, VK_TRUE, UINT64_MAX),
-		                     "wait for sparse image binding");
-		RequireVulkanSuccess(device.resetFences(1, &m_sparse_fence), "reset sparse binding fence");
+		if (bind_result != vk::Result::eSuccess) {
+			LOGF("BindSparseImageLevels: bindSparse failed: %s\n", vk::to_string(bind_result).c_str());
+			vmaFreeMemory(allocator, allocation);
+			return false;
+		}
+		const auto wait_res = device.waitForFences(1, &m_sparse_fence, VK_TRUE, UINT64_MAX);
+		if (wait_res != vk::Result::eSuccess) {
+			LOGF("BindSparseImageLevels: waitForFences failed: %s\n", vk::to_string(wait_res).c_str());
+			(void)device.resetFences(1, &m_sparse_fence);
+			vmaFreeMemory(allocator, allocation);
+			return false;
+		}
+		(void)device.resetFences(1, &m_sparse_fence);
 	}
 	state.allocations.push_back(allocation);
 	state.bytes += bytes;
 	state.first_bound = first;
 	state.tail_bound |= need_tail;
-	VramStats::Note(VramStats::Kind::Image, true, static_cast<int64_t>(bytes));
+	if (VramStats::Enabled()) {
+		VkMemoryPropertyFlags properties = 0;
+		vmaGetAllocationMemoryProperties(allocator, allocation, &properties);
+		const bool is_device_local = (properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+		VramStats::Note(VramStats::Kind::Image, is_device_local, static_cast<int64_t>(bytes));
+	}
+	return true;
 }
 
 void GraphicContext::ClearRetiredImages() {
@@ -773,11 +815,18 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 			                             image.extent.width, image.extent.height, image.mip_levels,
 			                             static_cast<uint32_t>(image.usage), image.sparse->bytes);
 		}
-		VramStats::Note(VramStats::Kind::Image, true, -static_cast<int64_t>(image.sparse->bytes));
 		{
 			Profiler::ScopedFrameWait timing(Profiler::FrameWait::NativeImageDestroy);
 			device.destroyImage(image.image, nullptr);
 			for (const auto allocation: image.sparse->allocations) {
+				if (VramStats::Enabled()) {
+					VkMemoryPropertyFlags properties = 0;
+					vmaGetAllocationMemoryProperties(allocator, allocation, &properties);
+					const bool is_device_local = (properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+					VmaAllocationInfo alloc_info {};
+					vmaGetAllocationInfo(allocator, allocation, &alloc_info);
+					VramStats::Note(VramStats::Kind::Image, is_device_local, -static_cast<int64_t>(alloc_info.size));
+				}
 				vmaFreeMemory(allocator, allocation);
 			}
 		}

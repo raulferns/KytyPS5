@@ -792,7 +792,7 @@ void TextureCache::EnsureResidency(ImageId id, uint32_t first_level, bool sampli
 	if (image.backing.sparse) {
 		// KYTY_TEXTURE_SPARSE_RESIDENCY: memory behind the newly resident levels, bound (and waited
 		// for) before anything records a write of them; their refresh follows (MarkResidencyDirty).
-		m_graphics.BindSparseImageLevels(image.backing, new_first);
+		(void)m_graphics.BindSparseImageLevels(image.backing, new_first);
 	}
 	if (registered) {
 		RegisterImage(id);
