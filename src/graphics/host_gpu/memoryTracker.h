@@ -445,7 +445,7 @@ private:
 	std::atomic_uint32_t                           m_hot_count {0};
 	// Dirtied-range log (EnableDirtiedLog). A set of disjoint ranges; past DirtiedLogMaxRanges it
 	// is dropped and the next take reports the loss.
-	static constexpr size_t DirtiedLogMaxRanges = 4096;
+	static constexpr size_t DirtiedLogMaxRanges = 16384;
 	std::atomic_bool        m_dirtied_log {false};
 	std::mutex              m_dirtied_mutex;
 	RangeSet                m_dirtied;

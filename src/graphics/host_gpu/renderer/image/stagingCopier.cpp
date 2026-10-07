@@ -78,25 +78,19 @@ void StagingCopier::WaitHost(uint64_t value) {
 
 void StagingCopier::Run(Job& job) {
 	Profiler::ScopedFrameWait timing(Profiler::FrameWait::TextureStagingCopy);
-	// Short slices: TryReadBacking holds the guest address-space lock while it copies.
-	constexpr uint64_t Slice = 256ull * 1024;
 	for (const auto& range: job.ranges) {
-		for (uint64_t done = 0; done < range.size;) {
-			const auto bytes = std::min(Slice, range.size - done);
-			auto*      dst   = range.destination + done;
-			const auto src   = range.guest_address + done;
-			if (!LibKernel::Memory::TryReadBackingDirect(src, dst, bytes) &&
-			    !LibKernel::Memory::TryReadPrtBacking(src, dst, bytes)) {
-				// The range was mapped when the refresh was recorded; unmapping drains the GPU
-				// (and so this job) first. Never leave a submission waiting on a failed copy.
-				std::memset(dst, 0, bytes);
-				if (++m_read_failures <= 16) {
-					LOGF("StagingCopier: failed to read guest image backing 0x%016" PRIx64
-					     " size=0x%" PRIx64 "\n",
-					     src, bytes);
-				}
+		auto*      dst = range.destination;
+		const auto src = range.guest_address;
+		if (!LibKernel::Memory::TryReadBackingDirect(src, dst, range.size) &&
+		    !LibKernel::Memory::TryReadPrtBacking(src, dst, range.size)) {
+			// The range was mapped when the refresh was recorded; unmapping drains the GPU
+			// (and so this job) first. Never leave a submission waiting on a failed copy.
+			std::memset(dst, 0, range.size);
+			if (++m_read_failures <= 16) {
+				LOGF("StagingCopier: failed to read guest image backing 0x%016" PRIx64
+				     " size=0x%" PRIx64 "\n",
+				     src, range.size);
 			}
-			done += bytes;
 		}
 	}
 	if (job.flush_buffer != nullptr && job.flush_size != 0) {

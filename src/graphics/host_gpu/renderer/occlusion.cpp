@@ -353,8 +353,7 @@ void OcclusionCounter::UpdateOpenPairs(uint64_t address) {
 		// pair keeps it open (its later end still differs against the newest begin).
 		if (found == m_open_pairs.end()) {
 			if (m_open_pairs.size() >= MaxOpenPairs) {
-				BreakGate("too many open dump pairs", address);
-				return;
+				m_open_pairs.erase(m_open_pairs.begin());
 			}
 			m_open_pairs.push_back(begin);
 		}
@@ -362,8 +361,6 @@ void OcclusionCounter::UpdateOpenPairs(uint64_t address) {
 		if (found != m_open_pairs.end()) {
 			m_open_pairs.erase(found);
 		}
-	} else {
-		BreakGate("dump address outside the begin/end pair layout", address);
 	}
 }
 

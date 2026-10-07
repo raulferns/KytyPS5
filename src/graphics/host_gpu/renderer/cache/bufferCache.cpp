@@ -4229,7 +4229,7 @@ void BufferCache::SynchronizeBdaBuffersNow(const RangeSet& mapped_ranges) {
 
 bool BufferCache::SynchronizeBdaDirtied(const RangeSet& mapped_ranges) {
 	// A hot run grows at most a few entries per pass; past this, rebuild the list in a full scan.
-	constexpr size_t MaxHotRanges = 4096;
+	constexpr size_t MaxHotRanges = 16384;
 	if (m_bda_hot_ranges.size() > MaxHotRanges) {
 		return false;
 	}

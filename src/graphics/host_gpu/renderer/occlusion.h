@@ -114,7 +114,7 @@ private:
 	}
 	void UpdateOpenPairs(uint64_t address);
 	void BreakGate(const char* reason, uint64_t address);
-	static constexpr size_t MaxOpenPairs = 64;
+	static constexpr size_t MaxOpenPairs = 2048;
 	std::vector<uint64_t> m_open_pairs; // begin addresses of dump pairs awaiting their end
 	bool m_gate_broken = false;
 	static constexpr uint32_t QueryCapacity = 1024;
